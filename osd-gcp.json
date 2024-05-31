@@ -1,0 +1,10 @@
+{
+    "managed_ocp_version": "4.14.24",
+    "managed_channel_group": "stable",
+    "openshift_cluster_name": "perf-180-kv",
+    "openshift_worker_count":180,
+    "openshift_network_type": "OVNKubernetes",
+    "rosa_environment": "stage",
+    "rosa_token": "",
+    "es_server": ""
+}
