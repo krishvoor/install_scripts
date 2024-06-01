@@ -3,13 +3,12 @@ set -ex
 
 export gcp_version_channel=${GCP_VERSION_CHANNEL:-stable}
 export control_plane_waiting_iterations=${GCP_CONTROL_PLANE_WAITING:-360}
-export waiting_per_worker=${GCP_WORKER_UPGRADE_TIME:-5}
 export GCP_CLUSTER_NAME=$(oc get infrastructure.config.openshift.io cluster -o json 2>/dev/null | jq -r '.status.infrastructureName | sub("-[^-]+$"; "")')
 export CURRENT_VERSION=$(oc get clusterversion | grep ^version | awk '{print $2}')
 export VERSION="4.15.14"
 export UUID="${UUID:-$(uuidgen | tr '[:upper:]' '[:lower:]')}"
-export KUBECONFIG="/var/folders/j6/48w6gy3n4d34gzr7jmxn6kcc0000gn/T/tmp.iEMmIb93Ko/kubeconfig"
-export ES_SERVER="${ES_SERVER=}"
+export KUBECONFIG="${KUBECONFIG:-}"
+export ES_SERVER="${ES_SERVER:-}"
 export _es_index="${ES_INDEX:-managedservices-timings}"
 export TEMP_DIR="$(mktemp -d)"
 
@@ -21,7 +20,7 @@ _download_binary(){
   KUBE_BURNER_URL="https://github.com/kube-burner/kube-burner-ocp/releases/download/${KUBE_BURNER_VERSION}/kube-burner-ocp-${KUBE_BURNER_VERSION}-linux-x86_64.tar.gz"
   
   # Download and extract the latest version
-  curl --fail --retry 8 --retry-all-errors -sS -L "${KUBE_BURNER_URL}" | tar -xzC ${TEMP_DIR} kube-burner-ocp
+  curl --fail --retry 8 -sS -L "${KUBE_BURNER_URL}" | tar -xzC ${TEMP_DIR} kube-burner-ocp
 }
 
 _run_kube_burner(){
@@ -39,11 +38,17 @@ _run_kube_burner(){
 
     # Index the metrics to ES_SERVER
     echo "Indexing the results"
-    $TEMP_DIR/kube-burner-ocp --start=$1 --end=$2 --log-level debug --es-server=${ES_SERVER} --es-index=ripsaw-kube-burner -t ${PROM_TOKEN} -u ${PROM_ROUTE} --job-name=$3 --metrics-profile=$TEMP_DIR/kube-burner-ocp-repo/config/metrics.yml
+    $TEMP_DIR/kube-burner-ocp index --start=$1 --end=$2 --log-level debug --es-server=${ES_SERVER} --es-index=ripsaw-kube-burner -t ${PROM_TOKEN} -u ${PROM_ROUTE} --job-name=$3 --metrics-profile=$TEMP_DIR/kube-burner-ocp-repo/config/metrics.yml
 }
 
 _gcp_MissingUpgradeableAnnotation(){
     oc patch cloudcredential.operator.openshift.io/cluster --type merge --patch '{"metadata": {"annotations": {"cloudcredential.openshift.io/upgradeable-to": "v4.15"}}}'
+}
+
+# _wait_for <resource> <resource_name> <desired_state> <timeout in minutes>
+_wait_for(){
+    echo "Waiting for $2 $1 to be $3 in $4 Minutes"
+    oc wait --for=condition=$3 --timeout=$4m $1 $2
 }
 
 gcp_upgrade(){
@@ -61,29 +66,46 @@ gcp_upgrade(){
     echo "INFO: Upgrading cluster ${GCP_CLUSTER_NAME} to ${VERSION} version..."
   fi
 
-  # Patch COO for MissingUpgradeableAnnotation 
+  # Patch for MissingUpgradeableAnnotation 
   _gcp_MissingUpgradeableAnnotation
+  sleep 300
+
   echo "INFO: Updating to the ${gcp_version_channel}-4.15 Channel"
   oc adm upgrade channel ${gcp_version_channel}-4.15
+  sleep 300
 
+  #######################################
+  # Capture the Master Node Upgrade
+  #######################################
+  KUBE_BURNER_UPGRADE_START=$(date +%s)
   echo "INFO: OCP Upgrade to 4.15 kick-started"
   oc adm upgrade --to=$VERSION --allow-not-recommended
-  UPGRADE_START=$(date +%s)
   gcp_cp_upgrade_active_waiting ${VERSION}
   if [ $? -eq 0 ] ; then
     CONTROLPLANE_UPGRADE_RESULT="OK"
   else
     CONTROLPLANE_UPGRADE_RESULT="Failed"
   fi
-#  gcp_workers_active_waiting
-#  if [ $? -eq 0 ] ; then
-#    WORKERS_UPGRADE_RESULT="OK"
-#  else
-#    WORKERS_UPGRADE_RESULT="Failed"
-#  fi
-  WORKERS_UPGRADE_DURATION="250"
-  WORKERS_UPGRADE_RESULT="NA"
-  UPGRADE_END=$(date +%s)
+
+  #######################################
+  # Capture the Worker Node MCP rollout
+  #######################################
+  WORKER_START=$(date +%s)
+  gcp_workers_active_waiting
+  if [ $? -eq 0 ] ; then
+    WORKERS_UPGRADE_RESULT="OK"
+  else
+    WORKERS_UPGRADE_RESULT="Failed"
+  fi
+  WORKER_END=$(date +%s)
+  WORKERS_UPGRADE_DURATION=$((${WORKER_END} - ${WORKER_START}))
+
+  echo "INFO: Wait till all operators are available"
+  _wait_for co --all Available=True 10
+  _wait_for co --all Progressing=False 10
+  _wait_for co --all Degraded=False 10
+  KUBE_BURNER_UPGRADE_END=$(date +%s)
+
   gcp_upgrade_index_results ${CONTROLPLANE_UPGRADE_DURATION} ${CONTROLPLANE_UPGRADE_RESULT} ${WORKERS_UPGRADE_DURATION} ${WORKERS_UPGRADE_RESULT} ${CURRENT_VERSION} ${VERSION}
   _run_kube_burner ${UPGRADE_START} ${UPGRADE_END} post-gcp-upgrade
   exit 0
@@ -112,6 +134,14 @@ gcp_cp_upgrade_active_waiting() {
     end_time=$(date +%s)
     export CONTROLPLANE_UPGRADE_DURATION=$((${end_time} - ${start_time}))
     return 1
+}
+
+gcp_workers_active_waiting() {
+    # Waiting for all worker Nodes to come online after the CP migration is successful
+    TIME_CHECK=$(oc get nodes | grep -ic worker)
+    _wait_for mcp worker Updated=True $(($TIME_CHECK*5))
+    _wait_for mcp worker Updating=False 30
+    _wait_for mcp worker Degraded=False 10
 }
 
 gcp_upgrade_index_results() {
