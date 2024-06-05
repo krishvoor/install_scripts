@@ -107,7 +107,7 @@ gcp_upgrade(){
   KUBE_BURNER_UPGRADE_END=$(date +%s)
 
   gcp_upgrade_index_results ${CONTROLPLANE_UPGRADE_DURATION} ${CONTROLPLANE_UPGRADE_RESULT} ${WORKERS_UPGRADE_DURATION} ${WORKERS_UPGRADE_RESULT} ${CURRENT_VERSION} ${VERSION}
-  _run_kube_burner ${UPGRADE_START} ${UPGRADE_END} post-gcp-upgrade
+  _run_kube_burner ${KUBE_BURNER_UPGRADE_START} ${KUBE_BURNER_UPGRADE_END} post-gcp-upgrade
   exit 0
 }
 
