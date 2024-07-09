@@ -8,6 +8,9 @@ export TEMP_DIR="$(mktemp -d)"
 export KUBECONFIG=${KUBECONFIG:-""}
 export NODE_UPGRADE_TIMEOUT=${NODE_UPGRADE_TIMEOUT:-"7200"}
 
+# Declare associative array to store upgrade durations
+declare -A upgrade_durations
+
 # ES_SERVER Details
 export ES_SERVER="${ES_SERVER=XXX}"
 export _es_index="${ES_INDEX:-}"
@@ -78,15 +81,15 @@ hcp_mp_upgrade(){
         while true; do
             sleep 120
             echo "INFO: Wait for the node upgrade for the $mp_id machinepool finished"
-            node_version=$(rosa list machinepool -c ${CLUSTER_ID} -o json | jq -r --arg k ${mp_id} '.[] | select(.id==$k) .version.id')
-            if [[ "${node_version}" =~ ${mp_recommended_version}- ]]; then
-                # record_cluster "timers.machinset_upgrade" "${mp_id}" $(( $(date +"%s") - "${start_time}" ))
-                # Capture individual MachinePool Upgrade timings
-                echo "INFO: "Machinepool:$mp_id upgraded successfully to the OCP version ${mp_recommended_version} after $(( $(date +"%s") - ${start_time} )) seconds""
+            node_version=$(rosa list machinepool -c ${CLUSTER_ID} -o json | jq -r --arg k ${mp_id} '.[] | select(.id==$k) .version.raw_id')
+            if [[ "${node_version}" == ${mp_recommended_version} ]]; then
+                end_time=$(date +"%s")
+                upgrade_durations[$mp_id]=$(( end_time - start_time ))
+                echo "INFO: "Machinepool:$mp_id upgraded successfully to the OCP version ${mp_recommended_version} after ${upgrade_duration} seconds""
                 break
             fi
 
-            if (( $(date +"%s") - $start_time >= $NODE_UPGRADE_TIMEOUT )); then
+            if (( $(date +"%s") - start_time >= $NODE_UPGRADE_TIMEOUT )); then
             echo "ERROR: Timed out while waiting for the machinepool upgrading to be ready"
             rosa list machinepool -c ${CLUSTER_ID}
             exit 1
