@@ -7,9 +7,11 @@ export UUID="${UUID:-$(uuidgen | tr '[:upper:]' '[:lower:]')}"
 export TEMP_DIR="$(mktemp -d)"
 export KUBECONFIG=${KUBECONFIG:-""}
 export NODE_UPGRADE_TIMEOUT=${NODE_UPGRADE_TIMEOUT:-"7200"}
+export MAX_SURGE=${MAX_SURGE:-"25%"}
+export MAX_UNAVAILABLE=${MAX_UNAVAILABLE:-"0%"}
 
 # Declare associative array to store upgrade durations
-declare -A upgrade_durations
+upgrade_durations=()
 
 # ES_SERVER Details
 export ES_SERVER="${ES_SERVER=XXX}"
@@ -46,12 +48,16 @@ hcp_cp_upgrade(){
     done
     cp_end_time=$(date +"%s")
     cp_upgrade_duration=$((cp_end_time - cp_start_time))
+
+    echo "INFO: Control Plane upgrade of ROSA-HCP:${CLUSTER_ID} is now completed in ${cp_upgrade_duration} seconds"
 }
 
 hcp_kb_cdv2(){
     echo "INFO: Install Cluster-density-v2 on the ROSA-HCP"
     pushd "/Users/krvoora/Desktop/mu-ms/cdv2"
-    kube-burner-ocp cluster-density-v2 --iterations-216 --churn=false --gc=false .
+    NODE_COUNT=`oc get no --no-headers | grep -v infra | wc -l`
+    ITERATIONS=$(( NODE_COUNT * 9 ))
+    kube-burner-ocp cluster-density-v2 --iterations=${ITERATIONS} --churn=false --gc=false .
     popd
 }
 
@@ -71,37 +77,65 @@ hcp_mp_upgrade(){
 
     # Start timer for MachinePool Scaling
     mp_start_time=$(date +"%s")
-    for mp_id in mp_list; do
+
+    # Iterate over machine pool IDs correctly
+    for mp_id in ${mp_list}; do
         echo "Upgrading the MP ${mp_id} part of ${CLUSTER_ID}"
         rosa upgrade machinepool ${mp_id} -y -c ${CLUSTER_ID} --version ${mp_recommended_version}
+
+        # If we don't use --schedule parameter, the above command 
+        # schedules the upgrade 10 minutes from the time of successful execution
+        sleep 600
     done
 
-    for mp_id in mp_list; do
+    for mp_id in ${mp_list}; do
         start_time=$(date +"%s")
         while true; do
             sleep 120
             echo "INFO: Wait for the node upgrade for the $mp_id machinepool finished"
             node_version=$(rosa list machinepool -c ${CLUSTER_ID} -o json | jq -r --arg k ${mp_id} '.[] | select(.id==$k) .version.raw_id')
-            if [[ "${node_version}" == ${mp_recommended_version} ]]; then
+            if [[ "${node_version}" == "${mp_recommended_version}" ]]; then
                 end_time=$(date +"%s")
                 upgrade_durations[$mp_id]=$(( end_time - start_time ))
-                echo "INFO: "Machinepool:$mp_id upgraded successfully to the OCP version ${mp_recommended_version} after ${upgrade_duration} seconds""
+                echo "INFO: Machinepool:$mp_id upgraded successfully to the OCP version ${mp_recommended_version} after ${upgrade_durations[$mp_id]} seconds"
                 break
             fi
 
             if (( $(date +"%s") - start_time >= $NODE_UPGRADE_TIMEOUT )); then
-            echo "ERROR: Timed out while waiting for the machinepool upgrading to be ready"
-            rosa list machinepool -c ${CLUSTER_ID}
-            exit 1
+                echo "ERROR: Timed out while waiting for the machinepool upgrading to be ready"
+                rosa list machinepool -c ${CLUSTER_ID}
+                exit 1
             fi
         done
     done
 }
 
-hcp_update_max_surge(){
-    echo "INFO: "
+
+hcp_update_max_surge_unavailable(){
+    echo "INFO: Fetch machinepools for ROSA-hcp ${CLUSTER_ID}"
+    mp_list=$(rosa list machinepool -c ${CLUSTER_ID} -o json | jq -r ".[].id")
+
+    for mp_id in mp_list; do
+        echo "INFO: Patching maxSurge and maxUnavailable for machinepool ${mp_id} in ROSA-HCP:${CLUSTER_ID}"
+        # Do this manually until OCM-9340 is fixed
+        # rosa edit machinepool --max-surge=${MAX_SURGE} --max-unavailable=${MAX_UNAVAILABLE} --cluster=${CLUSTER_ID} ${mp_id}
+
+        echo "INFO: Print maxSurge & maxUnavailable details for all machinepools in ROSA-HCP:${CLUSTER_ID}"
+        rosa list machinepool --cluster=${CLUSTER_ID} -ojson | jq '.[] | {id: .id,max_surge: .management_upgrade.max_surge, max_unavailable: .management_upgrade.max_unavailable, auto_repair: .auto_repair, version: .version.raw_id}'
+    done
 }
 
-hcp_update_max_unavailable(){
-    echo "INFO: "
-}
+# Install Dittybopper
+# hcp_install_dittybopper
+
+# Upgrade Control Plane & Report Timings
+# hcp_cp_upgrade
+
+# Install Cluster Density v2 on the cluster
+# hcp_kb_cdv2
+
+# Apply maxSurge & maxUnavailable
+hcp_update_max_surge_unavailable
+
+# Upgrade NodePool & Report Timings
+hcp_mp_upgrade
