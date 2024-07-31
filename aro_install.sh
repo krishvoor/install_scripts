@@ -85,7 +85,7 @@ aro_create() {
 
     echo "INFO: Get Kubeadmin Config"
     az aro get-admin-kubeconfig --name $ARO_CLUSTER_NAME --resource-group $ARO_RESOURCE_GROUP -f ${TEMP_DIR}/kubeconfig
-    sleep 180
+    sleep 600
 
     # Capture & Create cluster-admin login
 
